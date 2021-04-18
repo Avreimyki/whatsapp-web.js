@@ -1,7 +1,8 @@
 'use strict';
 
 const EventEmitter = require('events');
-const puppeteer = require('puppeteer');
+const chromium = require('chrome-aws-lambda'); 
+const puppeteer = chromium.puppeteer;
 const moduleRaid = require('@pedroslopez/moduleraid/moduleraid');
 const jsQR = require('jsqr');
 
