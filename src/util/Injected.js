@@ -7,38 +7,40 @@ exports.ExposeStore = (moduleRaidStr) => {
     window.mR = moduleRaid();
     window.Store = window.mR.findModule('Chat')[0].default;
     window.Store.AppState = window.mR.findModule('STREAM')[0].default;
+    window.Store.BlockContact = window.mR.findModule('blockContact')[0];
+    window.Store.Call = window.mR.findModule('CallCollection')[0].default;
+    window.Store.Cmd = window.mR.findModule('Cmd')[0].default;
     window.Store.Conn = window.mR.findModule('Conn')[0].default;
     window.Store.CryptoLib = window.mR.findModule('decryptE2EMedia')[0];
-    window.Store.Wap = window.mR.findModule('Wap')[0].default;
-    window.Store.SendSeen = window.mR.findModule('sendSeen')[0];
-    window.Store.SendClear = window.mR.findModule('sendClear')[0];
-    window.Store.SendDelete = window.mR.findModule('sendDelete')[0];
+    window.Store.DownloadManager = window.mR.findModule('DownloadManager')[0].default;
+    window.Store.Features = window.mR.findModule('FEATURE_CHANGE_EVENT')[0].default;
     window.Store.genId = window.mR.findModule('randomId')[0].default;
-    window.Store.SendMessage = window.mR.findModule('addAndSendMsgToChat')[0];
-    window.Store.MsgKey = window.mR.findModule((module) => module.default && module.default.fromString)[0].default;
+    window.Store.GroupMetadata = window.mR.findModule((module) => module.default && module.default.handlePendingInvite)[0].default;
     window.Store.Invite = window.mR.findModule('sendJoinGroupViaInvite')[0];
-    window.Store.OpaqueData = window.mR.findModule(module => module.default && module.default.createFromData)[0].default;
+    window.Store.Label = window.mR.findModule('LabelCollection')[0].default;
     window.Store.MediaPrep = window.mR.findModule('MediaPrep')[0];
     window.Store.MediaObject = window.mR.findModule('getOrCreateMediaObject')[0];
-    window.Store.MediaUpload = window.mR.findModule('uploadMedia')[0];
-    window.Store.Cmd = window.mR.findModule('Cmd')[0].default;
     window.Store.MediaTypes = window.mR.findModule('msgToMediaType')[0];
-    window.Store.VCard = window.mR.findModule('vcardFromContactModel')[0];
-    window.Store.UserConstructor = window.mR.findModule((module) => (module.default && module.default.prototype && module.default.prototype.isServer && module.default.prototype.isUser) ? module.default : null)[0].default;
-    window.Store.Validators = window.mR.findModule('findLinks')[0];
-    window.Store.WidFactory = window.mR.findModule('createWid')[0];
-    window.Store.BlockContact = window.mR.findModule('blockContact')[0];
-    window.Store.GroupMetadata = window.mR.findModule((module) => module.default && module.default.handlePendingInvite)[0].default;
-    window.Store.Sticker = window.mR.findModule('Sticker')[0].default.Sticker;
-    window.Store.UploadUtils = window.mR.findModule((module) => (module.default && module.default.encryptAndUpload) ? module.default : null)[0].default;
-    window.Store.Label = window.mR.findModule('LabelCollection')[0].default;
-    window.Store.Features = window.mR.findModule('FEATURE_CHANGE_EVENT')[0].default;
-    window.Store.QueryOrder = window.mR.findModule('queryOrder')[0];
+    window.Store.MediaUpload = window.mR.findModule('uploadMedia')[0];
+    window.Store.MsgKey = window.mR.findModule((module) => module.default && module.default.fromString)[0].default;
+    window.Store.OpaqueData = window.mR.findModule(module => module.default && module.default.createFromData)[0].default;
+    window.Store.QueryExist = window.mR.findModule('queryExist')[0].queryExist;
     window.Store.QueryProduct = window.mR.findModule('queryProduct')[0];
-    window.Store.DownloadManager = window.mR.findModule('DownloadManager')[0].default;
-    window.Store.Call = window.mR.findModule('CallCollection')[0].default;
-
-    if(!window.Store.Chat._find) {
+    window.Store.QueryOrder = window.mR.findModule('queryOrder')[0];
+    window.Store.SendClear = window.mR.findModule('sendClear')[0];
+    window.Store.SendDelete = window.mR.findModule('sendDelete')[0];
+    window.Store.SendMessage = window.mR.findModule('addAndSendMsgToChat')[0];
+    window.Store.SendSeen = window.mR.findModule('sendSeen')[0];
+    window.Store.Sticker = window.mR.findModule('Sticker')[0].default.Sticker;
+    window.Store.User = window.mR.findModule('getMaybeMeUser')[0];
+    window.Store.UploadUtils = window.mR.findModule((module) => (module.default && module.default.encryptAndUpload) ? module.default : null)[0].default;
+    window.Store.UserConstructor = window.mR.findModule((module) => (module.default && module.default.prototype && module.default.prototype.isServer && module.default.prototype.isUser) ? module.default : null)[0].default;
+    window.Store.Validators = window.mR.findModule('findLinks')[0];   
+    window.Store.VCard = window.mR.findModule('vcardFromContactModel')[0];
+    window.Store.Wap = window.mR.findModule('Wap')[0].default;
+    window.Store.WidFactory = window.mR.findModule('createWid')[0];
+ 
+    if (!window.Store.Chat._find) {
         window.Store.Chat._find = e => {
             const target = window.Store.Chat.get(e);
             return target ? Promise.resolve(target) : Promise.resolve({
@@ -53,10 +55,10 @@ exports.LoadUtils = () => {
 
     window.WWebJS.getNumberId = async (id) => {
 
-        let result = await window.Store.Wap.queryExist(id);
-        if (result.jid === undefined)
+        let result = await window.Store.QueryExist(id);
+        if (result.wid === undefined)
             throw 'The number provided is not a registered whatsapp user';
-        return result.jid;
+        return result.wid;
     };
 
     window.WWebJS.sendSeen = async (chatId) => {
@@ -205,7 +207,7 @@ exports.LoadUtils = () => {
             id: newMsgId,
             ack: 0,
             body: content,
-            from: window.Store.Conn.wid,
+            from: window.Store.User.getMeUser(),
             to: chat.id,
             local: true,
             self: 'out',
@@ -337,13 +339,15 @@ exports.LoadUtils = () => {
 
 
     window.WWebJS.getChatModel = async chat => {
+        
         let res = chat.serialize();
         res.isGroup = chat.isGroup;
         res.formattedTitle = chat.formattedTitle;
         res.isMuted = chat.mute && chat.mute.isMuted;
 
         if (chat.groupMetadata) {
-            await window.Store.GroupMetadata.update(chat.id._serialized);
+            const chatWid = window.Store.WidFactory.createWid((chat.id._serialized));
+            await window.Store.GroupMetadata.update(chatWid);
             res.groupMetadata = chat.groupMetadata.serialize();
         }
 
@@ -363,7 +367,7 @@ exports.LoadUtils = () => {
     window.WWebJS.getChats = async () => {
         const chats = window.Store.Chat.models;
 
-        const chatPromises = chats.map(chat => window.WWebJS.getChatModel(chat));
+        const chatPromises = chats.map(chat => window.WWebJS.getChatModel(chat));        
         return await Promise.all(chatPromises);
     };
 
