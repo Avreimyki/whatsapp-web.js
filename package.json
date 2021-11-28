@@ -29,7 +29,7 @@
   },
   "homepage": "https://wwebjs.dev/",
   "dependencies": {
-    "chrome-aws-lambda": "^8.0.2",
+    "chrome-aws-lambda": "^10.1.0",
     "@pedroslopez/moduleraid": "^5.0.2",
     "fluent-ffmpeg": "^2.1.2",
     "mime": "^2.4.5",
