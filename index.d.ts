@@ -48,6 +48,9 @@ declare namespace WAWebJS {
         /** Logs out the client, closing the current session */
         logout(): Promise<void>
 
+        /** Get all blocked contacts by host account */
+        getBlockedContacts(): Promise<Contact[]>
+
         /** Get chat instance by ID */
         getChatById(chatId: string): Promise<Chat>
 
@@ -59,6 +62,12 @@ declare namespace WAWebJS {
 
         /** Get all current contact instances */
         getContacts(): Promise<Contact[]>
+        
+        /** Get the country code of a WhatsApp ID. (154185968@c.us) => (1) */
+        getCountryCode(number: string): Promise<string>
+
+        /** Get the formatted number of a WhatsApp ID. (12345678901@c.us) => (+1 (234) 5678-901) */
+        getFormattedNumber(number: string): Promise<string>
 
         /** Get all current Labels  */
         getLabels(): Promise<Label[]>
@@ -91,11 +100,11 @@ declare namespace WAWebJS {
         getNumberId(number: string): Promise<ContactId | null>
 
         /**
-         * Mutes the Chat until a specified date
+         * Mutes this chat forever, unless a date is specified
          * @param chatId ID of the chat that will be muted
-         * @param unmuteDate Date when the chat will be unmuted
+         * @param unmuteDate Date when the chat will be unmuted, leave as is to mute forever
          */
-        muteChat(chatId: string, unmuteDate: Date): Promise<void>
+        muteChat(chatId: string, unmuteDate?: Date): Promise<void>
 
         /** Force reset of connection state for the client */
         resetState(): Promise<void>
@@ -140,7 +149,13 @@ declare namespace WAWebJS {
         on(event: 'auth_failure', listener: (message: string) => void): this
 
         /** Emitted when authentication is successful */
-        on(event: 'authenticated', listener: () => void): this
+        on(event: 'authenticated', listener: (
+            /** 
+             * Object containing session information. Can be used to restore the session
+             * @deprecated
+             */
+            session?: ClientSession
+        ) => void): this
 
         /** Emitted when the connection state changes */
         on(event: 'change_state', listener: (
@@ -269,9 +284,22 @@ declare namespace WAWebJS {
         /** Timeout for qr code selector in puppeteer
          * @default 45000 */
         qrTimeoutMs?: number,
+		/** How many times should the qrcode be refreshed before giving up
+		 * @default 0 (disabled) */
+		qrMaxRetries?: number,
         /** Restart client with a new session (i.e. use null 'session' var) if authentication fails
          * @default false */
         restartOnAuthFail?: boolean
+        /**
+         * Enable authentication via a `session` option.
+         * @deprecated Will be removed in a future release
+         */
+        useDeprecatedSessionAuth?: boolean
+        /** 
+         * WhatsApp session to restore. If not set, will start a new session
+         * @deprecated Set `useDeprecatedSessionAuth: true` to enable. This auth method is not supported by MultiDevice and will be removed in a future release. 
+         */
+        session?: ClientSession
         /** Client id to distinguish instances if you are using multiple, otherwise keep empty if you are using only one instance
          * @default '' */
         clientId: string
@@ -287,6 +315,17 @@ declare namespace WAWebJS {
         /** Ffmpeg path to use when formating videos to webp while sending stickers 
          * @default 'ffmpeg' */
         ffmpegPath?: string
+    }
+
+    /** 
+     * Represents a WhatsApp client session
+     * @deprecated
+     */
+    export interface ClientSession {
+        WABrowserId: string,
+        WASecretBundle: string,
+        WAToken1: string,
+        WAToken2: string,
     }
 
     export interface CreateGroupResult {
@@ -753,9 +792,16 @@ declare namespace WAWebJS {
          * Will return null when getting chat for currently logged in user.
          */
         getChat: () => Promise<Chat>,
-
+        
+        /** Returns the contact's countrycode, (1541859685@c.us) => (1) */
+        getCountryCode(): Promise<string>,
+        
+        /** Returns the contact's formatted phone number, (12345678901@c.us) => (+1 (234) 5678-901) */
+        getFormattedNumber(): Promise<string>,
+        
         /** Blocks this contact from WhatsApp */
         block: () => Promise<boolean>,
+
         /** Unlocks this contact from WhatsApp */
         unblock: () => Promise<boolean>,
 
@@ -834,8 +880,8 @@ declare namespace WAWebJS {
         delete: () => Promise<boolean>,
         /** Loads chat messages, sorted from earliest to latest. */
         fetchMessages: (searchOptions: MessageSearchOptions) => Promise<Message[]>,
-        /** Mutes this chat until a specified date */
-        mute: (unmuteDate: Date) => Promise<void>,
+        /** Mutes this chat forever, unless a date is specified */
+        mute: (unmuteDate?: Date) => Promise<void>,
         /** Send a message to this chat */
         sendMessage: (content: MessageContent, options?: MessageSendOptions) => Promise<Message>,
         /** Set the message as seen */

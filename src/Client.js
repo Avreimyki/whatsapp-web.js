@@ -6,7 +6,6 @@ const EventEmitter = require('events');
 const chromium = require('chrome-aws-lambda'); 
 const puppeteer = chromium.puppeteer;
 const moduleRaid = require('@pedroslopez/moduleraid/moduleraid');
-const jsQR = require('jsqr');
 
 const Util = require('./util/Util');
 const InterfaceController = require('./util/InterfaceController');
@@ -21,9 +20,10 @@ const { ClientInfo, Message, MessageMedia, Contact, Location, GroupNotification 
  * @param {object} options - Client options
  * @param {number} options.authTimeoutMs - Timeout for authentication selector in puppeteer
  * @param {object} options.puppeteer - Puppeteer launch options. View docs here: https://github.com/puppeteer/puppeteer/
- * @param {number} options.qrRefreshIntervalMs - Refresh interval for qr code (how much time to wait before checking if the qr code has changed)
- * @param {number} options.qrTimeoutMs - Timeout for qr code selector in puppeteer
+ * @param {number} options.qrMaxRetries - How many times should the qrcode be refreshed before giving up
  * @param {string} options.restartOnAuthFail  - Restart client with a new session (i.e. use null 'session' var) if authentication fails
+ * @param {boolean} options.useDeprecatedSessionAuth - Enable JSON-based authentication. This is deprecated due to not being supported by MultiDevice, and will be removed in a future version.
+ * @param {object} options.session - This is deprecated due to not being supported by MultiDevice, and will be removed in a future version.
  * @param {number} options.takeoverOnConflict - If another whatsapp web session is detected (another browser), take over the session in the current browser
  * @param {number} options.takeoverTimeoutMs - How much time to wait before taking over the session
  * @param {string} options.dataPath - Change the default path for saving session files, default is: "./WWebJS/"
@@ -56,6 +56,16 @@ class Client extends EventEmitter {
 
         this.id = this.options.clientId;
 
+        // eslint-disable-next-line no-useless-escape
+        const foldernameRegex = /^(?!.{256,})(?!(aux|clock\$|con|nul|prn|com[1-9]|lpt[1-9])(?:$|\.))[^ ][ \.\w-$()+=[\];#@~,&amp;']+[^\. ]$/i;
+        if (this.id && !foldernameRegex.test(this.id)) throw Error('Invalid client ID. Make sure you abide by the folder naming rules of your operating system.');
+        
+        if(!this.options.useDeprecatedSessionAuth) {
+            this.dataDir = this.options.puppeteer.userDataDir;
+            const dirPath = path.join(process.cwd(), this.options.dataPath, this.id ? 'session-' + this.id : 'session'); 
+            if (!this.dataDir) this.dataDir = dirPath;
+        }
+
         this.pupBrowser = null;
         this.pupPage = null;
 
@@ -68,23 +78,15 @@ class Client extends EventEmitter {
     async initialize() {
         let [browser, page] = [null, null];
         
-        // eslint-disable-next-line no-useless-escape
-        const foldernameRegex = /^(?!.{256,})(?!(aux|clock\$|con|nul|prn|com[1-9]|lpt[1-9])(?:$|\.))[^ ][ \.\w-$()+=[\];#@~,&amp;']+[^\. ]$/i;
-
-        if (this.id && !foldernameRegex.test(this.id)) throw Error('Invalid client ID. Make sure you abide by the folder naming rules of your operating system.');
-
-        const dirPath = path.join(process.cwd(), this.options.dataPath, this.id ? 'session-' + this.id : 'session'); 
-        
-        // eslint-disable-next-line no-useless-escape
-        if (fs.existsSync(dirPath)) fs.rmdirSync(path.join(dirPath, '/Default/Service\ Worker'), {recursive: true});
-            
-        if (!this.options.puppeteer.userDataDir) this.options.puppeteer.userDataDir = dirPath;
-       
-        if(this.options.puppeteer && this.options.puppeteer.browserWSEndpoint) {
-            browser = await puppeteer.connect(this.options.puppeteer);
+        const puppeteerOpts = {
+            ...this.options.puppeteer,
+            userDataDir: this.options.useDeprecatedSessionAuth ? undefined : this.dataDir
+        };
+        if(puppeteerOpts && puppeteerOpts.browserWSEndpoint) {
+            browser = await puppeteer.connect(puppeteerOpts);
             page = await browser.newPage();
         } else {
-            browser = await puppeteer.launch(this.options.puppeteer);
+            browser = await puppeteer.launch(puppeteerOpts);
             page = (await browser.pages())[0];
         }        
         
@@ -92,6 +94,17 @@ class Client extends EventEmitter {
 
         this.pupBrowser = browser;
         this.pupPage = page;
+
+        if (this.options.useDeprecatedSessionAuth && this.options.session) {
+            await page.evaluateOnNewDocument(
+                session => {
+                    localStorage.clear();
+                    localStorage.setItem('WABrowserId', session.WABrowserId);
+                    localStorage.setItem('WASecretBundle', session.WASecretBundle);
+                    localStorage.setItem('WAToken1', session.WAToken1);
+                    localStorage.setItem('WAToken2', session.WAToken2);
+                }, this.options.session);
+        } 
 
         if(this.options.bypassCSP) {
             await page.setBypassCSP(true);
@@ -103,73 +116,107 @@ class Client extends EventEmitter {
         });
 
         const INTRO_IMG_SELECTOR = '[data-testid="intro-md-beta-logo-dark"], [data-testid="intro-md-beta-logo-light"], [data-asset-intro-image-light="true"], [data-asset-intro-image-dark="true"]';
-        if (fs.existsSync(path.join(this.options.puppeteer.userDataDir, 'wwebjs.json')) && JSON.parse(fs.readFileSync(path.join(this.options.puppeteer.userDataDir, 'wwebjs.json'))).authenticated) {
-            try {
-                await page.waitForSelector(INTRO_IMG_SELECTOR, { timeout: this.options.authTimeoutMs });
-            } catch (err) {
-                if (err.name === 'TimeoutError') {
-                    /**
-                     * Emitted when there has been an error while trying to restore an existing session
-                     * @event Client#auth_failure
-                     * @param {string} message
-                     */
-                    this.emit(Events.AUTHENTICATION_FAILURE, 'Unable to log in. Are the files corrupt?');
-                    browser.close();
+        const INTRO_QRCODE_SELECTOR = 'div[data-ref] canvas';
 
-                    if (this.options.restartOnAuthFail) {
-                        // session restore failed so try again but without session to force new authentication
-                        this.initialize();
-                    }
-                    return;
-                }
+        // Checks which selector appears first
+        const needAuthentication = await Promise.race([
+            new Promise(resolve => {
+                page.waitForSelector(INTRO_IMG_SELECTOR, { timeout: this.options.authTimeoutMs })
+                    .then(() => resolve(false))
+                    .catch((err) => resolve(err));
+            }),
+            new Promise(resolve => {
+                page.waitForSelector(INTRO_QRCODE_SELECTOR, { timeout: this.options.authTimeoutMs })
+                    .then(() => resolve(true))
+                    .catch((err) => resolve(err));
+            })
+        ]);
 
-                throw err;
-            }
+        // Checks if an error ocurred on the first found selector. The second will be discarted and ignored by .race;
+        if (needAuthentication instanceof Error) throw needAuthentication;
 
-        } else {
-            const getQrCode = async () => {
-                // Check if retry button is present
-                var QR_RETRY_SELECTOR = 'div[data-ref] > span > button';
-                var qrRetry = await page.$(QR_RETRY_SELECTOR);
-                if (qrRetry) {
-                    await qrRetry.click();
-                }
+        // Scan-qrcode selector was found. Needs authentication
+        if (needAuthentication) {
+            const QR_CONTAINER = 'div[data-ref]';
+            const QR_RETRY_BUTTON = 'div[data-ref] > span > button';
 
-                // Wait for QR Code
-                const QR_CANVAS_SELECTOR = 'canvas';
-                await page.waitForSelector(QR_CANVAS_SELECTOR, { timeout: this.options.qrTimeoutMs });
-                const qrImgData = await page.$eval(QR_CANVAS_SELECTOR, canvas => [].slice.call(canvas.getContext('2d').getImageData(0, 0, 264, 264).data));
-                const qr = jsQR(qrImgData, 264, 264).data;
-                
-                /**
-                * Emitted when the QR code is received
-                * @event Client#qr
-                * @param {string} qr QR Code
-                */
+            let qrRetries = 0;
+            await page.exposeFunction('qrChanged', async (qr) => {
                 this.emit(Events.QR_RECEIVED, qr);
-            };
-            getQrCode();
-            this._qrRefreshInterval = setInterval(getQrCode, this.options.qrRefreshIntervalMs);
+                if (this.options.qrMaxRetries > 0) {
+                    qrRetries++;
+                    if (qrRetries > this.options.qrMaxRetries) {
+                        this.emit(Events.DISCONNECTED, 'Max qrcode retries reached');
+                        await this.destroy();
+                    }
+                }
+            });
+
+            await page.evaluate(function(selectors) {
+                const qr_container = document.querySelector(selectors.QR_CONTAINER);
+                window.qrChanged(qr_container.dataset.ref);
+
+                const obs = new MutationObserver((muts) => {
+                    muts.forEach(mut => {
+                        // Listens to qr token change
+                        if (mut.type === 'attributes' && mut.attributeName === 'data-ref') {
+                            window.qrChanged(mut.target.dataset.ref);
+                        } else
+                        // Listens to retry button, when found, click it
+                        if (mut.type === 'childList') {
+                            const retry_button = document.querySelector(selectors.QR_RETRY_BUTTON);
+                            if (retry_button) retry_button.click();
+                        }
+                    });
+                });
+                obs.observe(qr_container.parentElement, {
+                    subtree: true,
+                    childList: true,
+                    attributes: true,
+                    attributeFilter: ['data-ref'],
+                });
+            }, { 
+                QR_CONTAINER, 
+                QR_RETRY_BUTTON 
+            });
 
             // Wait for code scan
             await page.waitForSelector(INTRO_IMG_SELECTOR, { timeout: 0 });
-            clearInterval(this._qrRefreshInterval);
-            this._qrRefreshInterval = undefined;
-
         }
 
         await page.evaluate(ExposeStore, moduleRaid.toString());
+
+        let authEventPayload = undefined;
+        if(this.options.useDeprecatedSessionAuth) {
+            // Get session tokens
+            const localStorage = JSON.parse(await page.evaluate(() => {
+                return JSON.stringify(window.localStorage);
+            }));
+    
+            authEventPayload = {
+                WABrowserId: localStorage.WABrowserId,
+                WASecretBundle: localStorage.WASecretBundle,
+                WAToken1: localStorage.WAToken1,
+                WAToken2: localStorage.WAToken2
+            };
+        }
 
         /**
          * Emitted when authentication is successful
          * @event Client#authenticated
          */
-        this.emit(Events.AUTHENTICATED);
-
-        await fs.promises.writeFile(path.join(this.options.puppeteer.userDataDir, 'wwebjs.json'), JSON.stringify({authenticated: true}));
+        this.emit(Events.AUTHENTICATED, authEventPayload);
 
         // Check window.Store Injection
         await page.waitForFunction('window.Store != undefined');
+
+        const isMD = await page.evaluate(() => {
+            return window.Store.Features.features.MD_BACKEND;
+        });
+
+        if(this.options.useDeprecatedSessionAuth && isMD) {
+            throw new Error('Authenticating via JSON session is not supported for MultiDevice-enabled WhatsApp accounts.');
+        }
 
         //Load util functions (serializers, helper functions)
         await page.evaluate(LoadUtils);
@@ -387,9 +434,6 @@ class Client extends EventEmitter {
      * Closes the client
      */
     async destroy() {
-        if (this._qrRefreshInterval) {
-            clearInterval(this._qrRefreshInterval);
-        }
         await this.pupBrowser.close();
     }
 
@@ -397,9 +441,13 @@ class Client extends EventEmitter {
      * Logs out the client, closing the current session
      */
     async logout() {
-        return await this.pupPage.evaluate(() => {
+        await this.pupPage.evaluate(() => {
             return window.Store.AppState.logout();
         });
+
+        if(this.dataDir) {
+            return fs.rmdirSync(this.dataDir, {recursive: true});
+        }
     }
 
     /**
@@ -429,7 +477,7 @@ class Client extends EventEmitter {
     /**
      * Message options.
      * @typedef {Object} MessageSendOptions
-     * @property {boolean} [linkPreview=true] - Show links preview
+     * @property {boolean} [linkPreview=false] - Show links preview.
      * @property {boolean} [sendAudioAsVoice=false] - Send audio as voice message
      * @property {boolean} [sendVideoAsGif=false] - Send video as gif
      * @property {boolean} [sendMediaAsSticker=false] - Send media as a sticker
@@ -455,7 +503,7 @@ class Client extends EventEmitter {
      */
     async sendMessage(chatId, content, options = {}) {
         let internalOptions = {
-            linkPreview: options.linkPreview === false ? undefined : true,
+            linkPreview: options.linkPreview ? true : undefined,
             sendAudioAsVoice: options.sendAudioAsVoice,
             sendVideoAsGif: options.sendVideoAsGif,
             sendMediaAsSticker: options.sendMediaAsSticker,
@@ -660,7 +708,16 @@ class Client extends EventEmitter {
      */
     async sendPresenceAvailable() {
         return await this.pupPage.evaluate(() => {
-            return window.Store.Wap.sendPresenceAvailable();
+            return window.Store.PresenceUtils.sendPresenceAvailable();
+        });
+    }
+
+    /**
+     * Marks the client as unavailable
+     */
+    async sendPresenceUnavailable() {
+        return await this.pupPage.evaluate(() => {
+            return window.Store.PresenceUtils.sendPresenceUnavailable();
         });
     }
 
@@ -726,15 +783,16 @@ class Client extends EventEmitter {
     }
 
     /**
-     * Mutes the Chat until a specified date
+     * Mutes this chat forever, unless a date is specified
      * @param {string} chatId ID of the chat that will be muted
-     * @param {Date} unmuteDate Date when the chat will be unmuted
+     * @param {?Date} unmuteDate Date when the chat will be unmuted, leave as is to mute forever
      */
     async muteChat(chatId, unmuteDate) {
+        unmuteDate = unmuteDate ? unmuteDate.getTime() / 1000 : -1;
         await this.pupPage.evaluate(async (chatId, timestamp) => {
             let chat = await window.Store.Chat.get(chatId);
             await chat.mute.mute(timestamp, !0);
-        }, chatId, unmuteDate.getTime() / 1000);
+        }, chatId, unmuteDate || -1);
     }
 
     /**
@@ -766,7 +824,8 @@ class Client extends EventEmitter {
      */
     async getProfilePicUrl(contactId) {
         const profilePic = await this.pupPage.evaluate((contactId) => {
-            return window.Store.Wap.profilePicFind(contactId);
+            const chatWid = window.Store.WidFactory.createWid(contactId);
+            return window.Store.getProfilePicFull(chatWid);
         }, contactId);
 
         return profilePic ? profilePic.eurl : undefined;
@@ -794,8 +853,15 @@ class Client extends EventEmitter {
             id = '+' + id;
         }
         return await this.pupPage.evaluate(async (id) => {
-            let result = await window.Store.QueryExist(id);
-            return result.wid !== undefined;
+            if(window.Store.Features.features.MD_BACKEND){
+                let handler = (new window.Store.USyncQuery).withContactProtocol();
+                handler = handler.withUser( (new window.Store.USyncUser).withPhone(id),  handler.withBusinessProtocol(), 1 );
+                let result = await handler.execute();
+                return result.list[0].contact.type == 'in';
+            }else{
+                let result = await window.Store.Wap.queryExist(id);
+                return result.jid !== undefined;
+            }
         }, id);
     }
 
@@ -822,6 +888,33 @@ class Client extends EventEmitter {
     }
 
     /**
+     * Get the formatted number of a WhatsApp ID.
+     * @param {string} number Number or ID
+     * @returns {Promise<string>}
+     */
+    async getFormattedNumber(number) {
+        if(!number.endsWith('@s.whatsapp.net')) number = number.replace('c.us', 's.whatsapp.net');
+        if(!number.includes('@s.whatsapp.net')) number = `${number}@s.whatsapp.net`;
+        
+        return await this.pupPage.evaluate(async numberId => {
+            return window.Store.NumberInfo.formattedPhoneNumber(numberId);
+        }, number);
+    }
+    
+    /**
+     * Get the country code of a WhatsApp ID.
+     * @param {string} number Number or ID
+     * @returns {Promise<string>}
+     */
+    async getCountryCode(number) {
+        number = number.replace(' ', '').replace('+', '').replace('@c.us', '');
+
+        return await this.pupPage.evaluate(async numberId => {
+            return window.Store.NumberInfo.findCC(numberId);
+        }, number);
+    }
+    
+    /**
      * Create a new group
      * @param {string} name group title
      * @param {Array<Contact|string>} participants an array of Contacts or contact IDs to add to the group
@@ -839,15 +932,12 @@ class Client extends EventEmitter {
         }
 
         const createRes = await this.pupPage.evaluate(async (name, participantIds) => {
-            const res = await window.Store.Wap.createGroup(name, participantIds);
-            console.log(res);
-            if (!res.status === 200) {
-                throw 'An error occurred while creating the group!';
-            }
-
+            const participantWIDs = participantIds.map(p => window.Store.WidFactory.createWid(p));
+            const id = window.Store.genId();
+            const res = await window.Store.GroupUtils.sendCreateGroup(name, participantWIDs, undefined, id);
             return res;
         }, name, participants);
-
+        
         const missingParticipants = createRes.participants.reduce(((missing, c) => {
             const id = Object.keys(c)[0];
             const statusCode = c[id].code;
@@ -914,6 +1004,19 @@ class Client extends EventEmitter {
         }, labelId);
 
         return Promise.all(chatIds.map(id => this.getChatById(id)));
+    }
+
+    /**
+     * Gets all blocked contacts by host account
+     * @returns {Promise<Array<Contact>>}
+     */
+    async getBlockedContacts() {
+        const blockedContacts = await this.pupPage.evaluate(() => {
+            let chatIds = window.Store.Blocklist.models.map(a => a.id._serialized);
+            return Promise.all(chatIds.map(id => window.WWebJS.getContact(id)));            
+        });
+
+        return blockedContacts.map(contact => ContactFactory.create(this.client, contact));
     }
 }
 
